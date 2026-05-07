@@ -1,26 +1,23 @@
 [package]
 
 # Semantic Versioning is used: https://semver.org/
-version = "0.1.0"
+version = "0.1.1"
 
 # Description
 category = "isaaclab"
 readme  = "README.md"
 
-title = "Extension Template"
+title = "Isaac Lab Differentiable RL"
 author = "Isaac Lab Project Developers"
 maintainer = "Isaac Lab Project Developers"
-description="Extension Template for Isaac Lab"
+description = "Differentiable direct environment workflows for Isaac Lab"
 repository = "https://github.com/isaac-sim/IsaacLab.git"
-keywords = ["extension", "template", "isaaclab"]
+keywords = ["isaaclab", "diffrl", "differentiable", "reinforcement-learning"]
 
 [dependencies]
 "isaaclab" = {}
 "isaaclab_assets" = {}
-"isaaclab_mimic" = {}
-"isaaclab_rl" = {}
 "isaaclab_tasks" = {}
-# NOTE: Add additional dependencies here
 
 [[python.module]]
 name = "isaaclab_diffrl"

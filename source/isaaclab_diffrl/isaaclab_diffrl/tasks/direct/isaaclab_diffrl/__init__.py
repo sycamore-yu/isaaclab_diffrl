@@ -13,7 +13,7 @@ from . import agents
 
 
 gym.register(
-    id="Template-Isaaclab-Diffrl-Direct-v0",
+    id="Isaac-Cartpole-DiffRL-v0",
     entry_point=f"{__name__}.isaaclab_diffrl_env:IsaaclabDiffrlEnv",
     disable_env_checker=True,
     kwargs={
