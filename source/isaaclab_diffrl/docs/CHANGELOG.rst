@@ -1,6 +1,16 @@
 Changelog
 ---------
 
+0.1.6 (2026-05-08)
+~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added checkpoint export and restore support for the differentiable Newton
+  rollout path, with validation for checkpoint equivalence and bookkeeping
+  isolation.
+
 0.1.5 (2026-05-08)
 ~~~~~~~~~~~~~~~~~~
 

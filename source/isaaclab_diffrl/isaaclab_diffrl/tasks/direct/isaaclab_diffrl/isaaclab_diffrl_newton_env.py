@@ -114,6 +114,23 @@ class IsaaclabDiffrlNewtonEnv(IsaaclabDiffrlEnv):
         """
         return super().initialize_trajectory_from_current_state(env_ids=env_ids)
 
+    def _get_checkpoint_bridge(self):
+        """Return the active Newton rollout bridge, creating one on demand."""
+        bridge = getattr(self, "_active_bridge", None)
+        if bridge is None:
+            from .newton_torch_autograd import NewtonCartpoleAutogradBridge
+
+            bridge = NewtonCartpoleAutogradBridge(self)
+        return bridge
+
+    def export_differentiable_checkpoint(self) -> dict[str, dict[str, torch.Tensor]]:
+        """Export the rollout checkpoint over Newton model/state/control tensors."""
+        return self._get_checkpoint_bridge().export_checkpoint()
+
+    def restore_differentiable_checkpoint(self, checkpoint: dict[str, dict[str, torch.Tensor]]) -> None:
+        """Restore a rollout checkpoint without touching env bookkeeping buffers."""
+        self._get_checkpoint_bridge().restore_checkpoint(checkpoint)
+
     def _reset_idx(self, env_ids: Sequence[int] | None = None):
         """Reset specified envs and capture terminal observation before state change.
 

@@ -171,6 +171,71 @@ def validate_reset_detach(bridge: NewtonCartpoleAutogradBridge) -> None:
     print("[VALIDATION] reset_boundary=detached")
 
 
+def validate_checkpoint_restore(env, bridge: NewtonCartpoleAutogradBridge) -> None:
+    """Check checkpoint export/restore round-trips rollout state only."""
+    rollout_action = torch.tensor([0.35], device=env.device, dtype=env.joint_pos.dtype)
+    next_action = torch.tensor([0.15], device=env.device, dtype=env.joint_pos.dtype)
+
+    joint_q, joint_qd = bridge.get_initial_joint_state()
+    checkpoint_joint_q, checkpoint_joint_qd = bridge.step_forward(joint_q, joint_qd, rollout_action)
+    bridge.initialize_trajectory(checkpoint_joint_q, checkpoint_joint_qd)
+    expected_joint_q, expected_joint_qd = bridge.get_initial_joint_state()
+    expected_env_joint_q = flatten_env_state(env.joint_pos)
+    expected_env_joint_qd = flatten_env_state(env.joint_vel)
+
+    checkpoint = env.export_differentiable_checkpoint()
+    expected_payload_keys = {"model", "state_in", "state_out", "control"}
+    if set(checkpoint.keys()) != expected_payload_keys:
+        raise RuntimeError(f"Checkpoint keys mismatch: {sorted(checkpoint.keys())}")
+    for bookkeeping_name in ("episode_length_buf", "reset_buf", "reset_terminated", "reset_time_outs"):
+        if bookkeeping_name in checkpoint:
+            raise RuntimeError(f"Checkpoint unexpectedly captured bookkeeping buffer: {bookkeeping_name}")
+
+    expected_next_joint_q, expected_next_joint_qd = bridge.step_forward(expected_joint_q, expected_joint_qd, next_action)
+
+    env.episode_length_buf[:] = 7
+    env.reset_buf[:] = True
+    env.reset_terminated[:] = True
+    env.reset_time_outs[:] = True
+
+    perturbed_joint_q = expected_joint_q + torch.tensor([0.05, -0.04], device=env.device, dtype=expected_joint_q.dtype)
+    perturbed_joint_qd = expected_joint_qd + torch.tensor([0.03, -0.02], device=env.device, dtype=expected_joint_qd.dtype)
+    bridge.initialize_trajectory(perturbed_joint_q, perturbed_joint_qd)
+
+    perturbed_env_joint_q = flatten_env_state(env.joint_pos)
+    if torch.allclose(perturbed_env_joint_q, expected_env_joint_q, atol=1.0e-6, rtol=1.0e-6):
+        raise RuntimeError("Checkpoint perturbation did not move the live physical state.")
+
+    env.restore_differentiable_checkpoint(checkpoint)
+
+    restored_joint_q, restored_joint_qd = bridge.get_initial_joint_state()
+    restored_env_joint_q = flatten_env_state(env.joint_pos)
+    restored_env_joint_qd = flatten_env_state(env.joint_vel)
+    restored_next_joint_q, restored_next_joint_qd = bridge.step_forward(restored_joint_q, restored_joint_qd, next_action)
+
+    if not torch.equal(env.episode_length_buf, torch.full_like(env.episode_length_buf, 7)):
+        raise RuntimeError("Checkpoint restore modified episode_length_buf.")
+    if not torch.equal(env.reset_buf, torch.ones_like(env.reset_buf, dtype=torch.bool)):
+        raise RuntimeError("Checkpoint restore modified reset_buf.")
+    if not torch.equal(env.reset_terminated, torch.ones_like(env.reset_terminated, dtype=torch.bool)):
+        raise RuntimeError("Checkpoint restore modified reset_terminated.")
+    if not torch.equal(env.reset_time_outs, torch.ones_like(env.reset_time_outs, dtype=torch.bool)):
+        raise RuntimeError("Checkpoint restore modified reset_time_outs.")
+
+    for name, restored, expected in (
+        ("bridge_joint_q", restored_joint_q, expected_joint_q),
+        ("bridge_joint_qd", restored_joint_qd, expected_joint_qd),
+        ("env_joint_q", restored_env_joint_q, expected_env_joint_q),
+        ("env_joint_qd", restored_env_joint_qd, expected_env_joint_qd),
+        ("next_joint_q", restored_next_joint_q, expected_next_joint_q),
+        ("next_joint_qd", restored_next_joint_qd, expected_next_joint_qd),
+    ):
+        if not torch.allclose(restored, expected, atol=1.0e-6, rtol=1.0e-6):
+            raise RuntimeError(f"Checkpoint restore mismatch for {name}.")
+
+    print("[VALIDATION] checkpoint_restore=equivalent")
+
+
 def main() -> None:
     """Run the differentiable rollout validation."""
     torch.manual_seed(0)
@@ -202,6 +267,7 @@ def main() -> None:
         validate_current_state_reinit(bridge, previous_joint_q, current_joint_q, current_joint_qd)
         validate_reset_detach(bridge)
         validate_rollout_reinit_detach(bridge)
+        validate_checkpoint_restore(env.unwrapped, bridge)
 
         # Gradient validation and finite-difference checks.
         joint_q, joint_qd = bridge.get_initial_joint_state()

@@ -103,6 +103,19 @@ class NewtonCartpoleAutogradBridge:
         "_model_changes",
         "_views",
     )
+    _CHECKPOINT_TENSOR_NAMES = {
+        "model": (
+            "joint_act",
+            "joint_f",
+            "joint_q",
+            "joint_qd",
+            "joint_target_pos",
+            "joint_target_vel",
+        ),
+        "state_in": ("body_f", "body_q", "body_qd", "joint_q", "joint_qd"),
+        "state_out": ("body_f", "body_q", "body_qd", "joint_q", "joint_qd"),
+        "control": ("joint_act", "joint_f", "joint_target_pos", "joint_target_vel"),
+    }
 
     def __init__(self, env) -> None:
         self.env = env
@@ -244,6 +257,7 @@ class NewtonCartpoleAutogradBridge:
 
         self.initial_joint_q = joint_q
         self.initial_joint_qd = joint_qd
+        self._sync_env_joint_buffers(joint_q, joint_qd)
         return self.get_initial_joint_state()
 
     def initialize_trajectory(
@@ -255,6 +269,70 @@ class NewtonCartpoleAutogradBridge:
         if joint_q is None or joint_qd is None:
             joint_q, joint_qd = self.env.initialize_trajectory_from_current_state()
         return self._sync_joint_state(joint_q, joint_qd)
+
+    @staticmethod
+    def _clone_warp_tensor(array) -> torch.Tensor:
+        """Clone a Warp array into a detached Torch tensor."""
+        return wp.to_torch(array).detach().clone()
+
+    @staticmethod
+    def _restore_warp_tensor(array, tensor: torch.Tensor) -> None:
+        """Copy a Torch tensor back into a Warp array."""
+        array.assign(wp.from_torch(tensor.contiguous(), dtype=array.dtype))
+
+    def _capture_tensor_group(self, owner, group_name: str) -> dict[str, torch.Tensor]:
+        """Capture selected rollout tensors from one Newton object."""
+        payload: dict[str, torch.Tensor] = {}
+        for tensor_name in self._CHECKPOINT_TENSOR_NAMES[group_name]:
+            array = getattr(owner, tensor_name, None)
+            if array is None:
+                continue
+            payload[tensor_name] = self._clone_warp_tensor(array)
+        return payload
+
+    def _sync_env_joint_buffers(self, joint_q: torch.Tensor, joint_qd: torch.Tensor) -> None:
+        """Mirror rollout joint state onto the env-owned observability tensors."""
+        self.env.joint_pos[:] = joint_q.reshape_as(self.env.joint_pos)
+        self.env.joint_vel[:] = joint_qd.reshape_as(self.env.joint_vel)
+
+    def _restore_tensor_group(self, owner, payload: dict[str, torch.Tensor]) -> None:
+        """Restore selected rollout tensors onto one Newton object."""
+        for tensor_name, tensor in payload.items():
+            array = getattr(owner, tensor_name, None)
+            if array is None:
+                continue
+            self._restore_warp_tensor(array, tensor)
+
+    def export_checkpoint(self) -> dict[str, dict[str, torch.Tensor]]:
+        """Export the differentiable rollout checkpoint payload.
+
+        The payload contains only Newton model/state/control tensors needed to
+        resume the physical trajectory. Episode counters and reset buffers stay
+        on the env and remain outside the payload.
+        """
+        return {
+            "model": self._capture_tensor_group(self.model, "model"),
+            "state_in": self._capture_tensor_group(self.state_in, "state_in"),
+            "state_out": self._capture_tensor_group(self.state_out, "state_out"),
+            "control": self._capture_tensor_group(self.control, "control"),
+        }
+
+    def restore_checkpoint(self, checkpoint: dict[str, dict[str, torch.Tensor]]) -> None:
+        """Restore a differentiable rollout checkpoint payload."""
+        if self._step_tape is not None:
+            self._step_tape = None
+            self._clear_grad_refs()
+
+        self._restore_tensor_group(self.model, checkpoint["model"])
+        self._restore_tensor_group(self.state_in, checkpoint["state_in"])
+        self._restore_tensor_group(self.state_out, checkpoint["state_out"])
+        self._restore_tensor_group(self.control, checkpoint["control"])
+        self.clear_dynamic_grads()
+
+        self.initial_joint_q = checkpoint["state_in"]["joint_q"].detach().clone()
+        self.initial_joint_qd = checkpoint["state_in"]["joint_qd"].detach().clone()
+        self.control_template_joint_f = self._clone_warp_tensor(self.control.joint_f)
+        self._sync_env_joint_buffers(self.initial_joint_q, self.initial_joint_qd)
 
     def get_initial_joint_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the current rollout-initialized Newton joint state."""
