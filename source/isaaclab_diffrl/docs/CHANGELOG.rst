@@ -1,6 +1,15 @@
 Changelog
 ---------
 
+0.1.5 (2026-05-08)
+~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added a Mineral-facing cartpole adapter and APG/BPTT tracer-bullet
+  validation for the differentiable Newton rollout path.
+
 0.1.4 (2026-05-08)
 ~~~~~~~~~~~~~~~~~~
 
