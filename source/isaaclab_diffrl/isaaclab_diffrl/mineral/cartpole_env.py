@@ -55,6 +55,7 @@ class MineralCartpoleEnvAdapter:
         self.num_obs = 4
         self.num_actions = 1
         self.episode_length = int(env.max_episode_length)
+        self.max_episode_length = self.episode_length
 
         self.observation_space = spaces.Box(low=-math.inf, high=math.inf, shape=(self.num_obs,), dtype=np.float32)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(self.num_actions,), dtype=np.float32)
@@ -70,6 +71,10 @@ class MineralCartpoleEnvAdapter:
     def _obs_from_joint_state(self, joint_q: torch.Tensor, joint_qd: torch.Tensor) -> torch.Tensor:
         obs = torch.stack((joint_q[1], joint_qd[1], joint_q[0], joint_qd[0]))
         return obs.unsqueeze(0)
+
+    @staticmethod
+    def _obs_dict(obs: torch.Tensor) -> dict[str, torch.Tensor]:
+        return {"obs": obs}
 
     def _terminal_flags(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         cart_pos = obs[:, 2]
@@ -126,7 +131,7 @@ class MineralCartpoleEnvAdapter:
             extras = {
                 "terminated": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
                 "truncated": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
-                "obs_before_reset": obs,
+                "obs_before_reset": self._obs_dict(obs),
             }
             reward = torch.zeros(self.num_envs, dtype=obs.dtype, device=self.device)
             done = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -155,7 +160,7 @@ class MineralCartpoleEnvAdapter:
         extras = {
             "terminated": terminated.clone(),
             "truncated": truncated.clone(),
-            "obs_before_reset": obs,
+            "obs_before_reset": self._obs_dict(obs),
         }
         if bool(done.any().item()):
             self._pending_reset = True

@@ -1,6 +1,15 @@
 Changelog
 ---------
 
+0.1.7 (2026-05-08)
+~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added a Mineral SHAC tracer bullet that validates timeout bootstrap through
+  terminal ``obs_before_reset`` on the differentiable Newton cartpole task.
+
 0.1.6 (2026-05-08)
 ~~~~~~~~~~~~~~~~~~
 
