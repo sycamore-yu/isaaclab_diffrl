@@ -113,3 +113,41 @@ class IsaaclabDiffrlNewtonEnv(IsaaclabDiffrlEnv):
             Detached joint position and velocity tensors for each env.
         """
         return super().initialize_trajectory_from_current_state(env_ids=env_ids)
+
+    def _reset_idx(self, env_ids: Sequence[int] | None = None):
+        """Reset specified envs and capture terminal observation before state change.
+
+        Overrides the base ``_reset_idx`` to store the pre-reset (terminal)
+        observation in ``_cached_obs_before_reset``.  This cached observation
+        is consumed by :meth:`step` to populate ``extras["obs_before_reset"]``
+        per the rewarped-compatible step semantic (Issue 04).
+
+        Clears any active bridge tape before reset-side writes can touch the
+        shared Newton buffers, matching the guard in :meth:`reset`.
+        """
+        self._zero_bridge_tape()
+        if self._cached_obs_before_reset is None:
+            self._cached_obs_before_reset = self._get_observations()
+        super()._reset_idx(env_ids)
+
+    def step(self, action: torch.Tensor):
+        """Execute one environment step with rewarped-compatible terminal observation semantics.
+
+        The reward and done flags are computed from the pre-reset (terminal)
+        physics state.  The terminal observation is captured before autoreset
+        and stored as ``extras["obs_before_reset"]``, matching the rewarped
+        convention.  After autoreset, the returned observation corresponds to
+        the next post-reset state.
+
+        Acceptance criteria (Issue 04):
+        - AC1: reward and done come from the pre-reset terminal state.
+        - AC2: ``extras["obs_before_reset"]`` holds the terminal observation.
+        - AC3: the returned observation is from the post-reset state.
+        """
+        self._cached_obs_before_reset = None
+        obs, rew, terminated, truncated, extras = super().step(action)
+        if self._cached_obs_before_reset is not None:
+            extras["obs_before_reset"] = self._cached_obs_before_reset
+        else:
+            extras["obs_before_reset"] = obs
+        return obs, rew, terminated, truncated, extras

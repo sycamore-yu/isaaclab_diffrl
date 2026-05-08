@@ -1,6 +1,16 @@
 Changelog
 ---------
 
+0.1.4 (2026-05-08)
+~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added rewarped-compatible step semantics for the differentiable Newton
+  cartpole task, including terminal ``obs_before_reset`` capture and
+  validation for post-reset observation behavior.
+
 0.1.3 (2026-05-08)
 ~~~~~~~~~~~~~~~~~~
 
