@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from typing import Any
 
 import torch
 import warp as wp
@@ -83,13 +84,45 @@ class IsaaclabDiffrlEnv(DirectRLEnv):
         return total_reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        self.joint_pos = wp.to_torch(self.robot.data.joint_pos)
-        self.joint_vel = wp.to_torch(self.robot.data.joint_vel)
+        # Detach: robot data may wrap differentiable Newton buffers, but
+        # these env observability tensors must stay grad-free for in-place
+        # writes in _reset_idx.
+        self.joint_pos = wp.to_torch(self.robot.data.joint_pos).detach()
+        self.joint_vel = wp.to_torch(self.robot.data.joint_vel).detach()
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         out_of_bounds = torch.any(torch.abs(self.joint_pos[:, self._cart_dof_idx]) > self.cfg.max_cart_pos, dim=1)
         out_of_bounds = out_of_bounds | torch.any(torch.abs(self.joint_pos[:, self._pole_dof_idx]) > math.pi / 2, dim=1)
         return out_of_bounds, time_out
+
+    def initialize_trajectory_from_current_state(
+        self,
+        env_ids: Sequence[int] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Start a new rollout from the current physical state without random reset."""
+        if env_ids is None:
+            env_ids = self.robot._ALL_INDICES
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+
+        # Detach: robot data may be differentiable, but the env observability
+        # tensors must stay grad-free for _reset_idx in-place writes.
+        self.joint_pos = wp.to_torch(self.robot.data.joint_pos).detach()
+        self.joint_vel = wp.to_torch(self.robot.data.joint_vel).detach()
+
+        joint_pos = self.joint_pos[env_ids].detach().clone()
+        joint_vel = self.joint_vel[env_ids].detach().clone()
+
+        self.episode_length_buf[env_ids] = 0
+        self.reset_buf[env_ids] = False
+        self.reset_terminated[env_ids] = False
+        self.reset_time_outs[env_ids] = False
+
+        return joint_pos, joint_vel
+
+    def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
+        observations, extras = super().reset(seed=seed, options=options)
+        self.initialize_trajectory_from_current_state()
+        return observations, extras
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:

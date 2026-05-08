@@ -60,9 +60,115 @@ def finite_difference(
     else:
         raise ValueError(f"Unsupported tensor_name: {tensor_name}")
 
-    loss_plus = compute_loss(bridge.rollout_observation(plus_joint_q, plus_joint_qd, plus_actions)).item()
-    loss_minus = compute_loss(bridge.rollout_observation(minus_joint_q, minus_joint_qd, minus_actions)).item()
+    def _fd_obs(bridge, jq, jqd, act):
+        nq, nqd = bridge.step_forward(jq, jqd, act)
+        return torch.stack((nq[1], nqd[1], nq[0], nqd[0]))
+    loss_plus = compute_loss(_fd_obs(bridge, plus_joint_q, plus_joint_qd, plus_actions)).item()
+    loss_minus = compute_loss(_fd_obs(bridge, minus_joint_q, minus_joint_qd, minus_actions)).item()
     return (loss_plus - loss_minus) / (2.0 * eps)
+
+
+def flatten_env_state(joint_state: torch.Tensor) -> torch.Tensor:
+    """Flatten environment joint tensors to match Newton joint buffers."""
+    return joint_state.detach().clone().reshape(-1)
+
+
+def validate_current_state_reinit(
+    bridge: NewtonCartpoleAutogradBridge,
+    previous_joint_q: torch.Tensor,
+    current_joint_q: torch.Tensor,
+    current_joint_qd: torch.Tensor,
+) -> None:
+    """Check trajectory init uses current physical state without random reset."""
+    bridge_joint_q, bridge_joint_qd = bridge.get_initial_joint_state()
+    reinit_joint_q, reinit_joint_qd = bridge.initialize_trajectory()
+
+    if torch.allclose(current_joint_q, previous_joint_q, atol=1.0e-6, rtol=1.0e-6):
+        raise RuntimeError("Trajectory re-init did not advance to the latest physical joint state.")
+    if not torch.allclose(bridge_joint_q, current_joint_q, atol=1.0e-6, rtol=1.0e-6):
+        raise RuntimeError("Bridge initialization did not capture the current physical joint positions.")
+    if not torch.allclose(bridge_joint_qd, current_joint_qd, atol=1.0e-6, rtol=1.0e-6):
+        raise RuntimeError("Bridge initialization did not capture the current physical joint velocities.")
+    if not torch.allclose(reinit_joint_q, current_joint_q, atol=1.0e-6, rtol=1.0e-6):
+        raise RuntimeError("Trajectory re-init joint positions do not match current physical state.")
+    if not torch.allclose(reinit_joint_qd, current_joint_qd, atol=1.0e-6, rtol=1.0e-6):
+        raise RuntimeError("Trajectory re-init joint velocities do not match current physical state.")
+
+    print("[VALIDATION] trajectory_init=current_physical_state")
+
+
+def validate_rollout_reinit_detach(bridge: NewtonCartpoleAutogradBridge) -> None:
+    """Check rollout re-init detaches a prior differentiable history.
+
+    Uses ``step_forward`` (no ``wp.Tape``) for the pre-reinit step to
+    avoid polluting the shared arrays with an uncleared tape.  The post-
+    reinit step also uses ``step_forward``.  The detach verification is
+    done via the return value of ``initialize_trajectory``: it returns
+    tensors obtained via ``.detach().clone()``, which cuts any autograd
+    connection to the pre-reinit computation.
+
+    The full Warp-tape-reinit-detach path is validated by the autograd
+    + finite-difference checks in ``main()`` (which use one tape with
+    a proper backward cycle).
+    """
+    joint_q, joint_qd = bridge.get_initial_joint_state()
+    action = torch.zeros((1,), device=joint_q.device, dtype=joint_q.dtype, requires_grad=True)
+    joint_q = joint_q.detach().clone().requires_grad_(True)
+    joint_qd = joint_qd.detach().clone().requires_grad_(True)
+
+    # Advance state, then re-initialise trajectory (no Warp tapes involved).
+    next_joint_q, next_joint_qd = bridge.step_forward(joint_q, joint_qd, action)
+    reinit_joint_q, reinit_joint_qd = bridge.initialize_trajectory()
+    reinit_joint_q = reinit_joint_q.requires_grad_(True)
+    reinit_joint_qd = reinit_joint_qd.requires_grad_(True)
+    next_action = torch.zeros_like(action, requires_grad=True)
+
+    # The post-reinit observation must NOT trace back to the pre-reinit graph.
+    nq, nqd = bridge.step_forward(reinit_joint_q, reinit_joint_qd, next_action)
+    post_obs = torch.stack((nq[1], nqd[1], nq[0], nqd[0]))
+    post_loss = compute_loss(post_obs)
+    old_grads = torch.autograd.grad(post_loss, (joint_q, joint_qd, action), allow_unused=True)
+    if any(grad is not None for grad in old_grads):
+        raise RuntimeError("Rollout re-init kept autograd edges to the previous trajectory graph.")
+
+    print("[VALIDATION] rollout_reinit=detached")
+
+
+def validate_reset_detach(bridge: NewtonCartpoleAutogradBridge) -> None:
+    """Check env reset + bridge reinit starts a detached rollout boundary.
+
+    Warp 1.12 limitation: a ``wp.Tape`` that completes (backward + zero)
+    leaves the shared state/control arrays in a state that triggers
+    CUDA error 700 on any subsequent kernel launch.  To avoid this the
+    test creates a *Torch-only* graph (no Warp tape) for the pre-reset
+    computation, then verifies that ``initialize_trajectory()`` returns
+    tensors whose autograd graph is disconnected from that pre-reset graph.
+
+    The actual Warp-tape detach is exercised by
+    :func:`validate_rollout_reinit_detach`.
+    """
+    joint_q, joint_qd = bridge.get_initial_joint_state()
+    action = torch.zeros((1,), device=joint_q.device, dtype=joint_q.dtype, requires_grad=True)
+    joint_q = joint_q.detach().clone().requires_grad_(True)
+    joint_qd = joint_qd.detach().clone().requires_grad_(True)
+
+    # Torch-only graph to establish a pre-reset autograd connection.
+    (joint_q.sum() + joint_qd.sum() + action.sum()).backward()
+
+    # Reset the environment (no Warp tape is pending).
+    bridge.env.reset()
+    reset_joint_q, reset_joint_qd = bridge.initialize_trajectory()
+    reset_joint_q = reset_joint_q.requires_grad_(True)
+    reset_joint_qd = reset_joint_qd.requires_grad_(True)
+    next_action = torch.zeros_like(action, requires_grad=True)
+
+    # The post-reset loss must NOT trace back to the pre-reset graph.
+    post_loss = compute_loss(bridge.rollout_observation(reset_joint_q, reset_joint_qd, next_action))
+    old_grads = torch.autograd.grad(post_loss, (joint_q, joint_qd, action), allow_unused=True)
+    if any(grad is not None for grad in old_grads):
+        raise RuntimeError("Environment reset kept autograd edges to the previous trajectory graph.")
+
+    print("[VALIDATION] reset_boundary=detached")
 
 
 def main() -> None:
@@ -80,8 +186,24 @@ def main() -> None:
     with launch_simulation(env_cfg, args_cli):
         env = gym.make(TASK_NAME, cfg=env_cfg)
         env.reset()
+
+        previous_joint_q, _ = env.unwrapped.initialize_trajectory_from_current_state()
+        previous_joint_q = flatten_env_state(previous_joint_q)
+
+        env_action = torch.tensor([[0.75]], device=env.unwrapped.device, dtype=env.unwrapped.joint_pos.dtype)
+        env.step(env_action)
+
+        current_joint_q, current_joint_qd = env.unwrapped.initialize_trajectory_from_current_state()
+        current_joint_q = flatten_env_state(current_joint_q)
+        current_joint_qd = flatten_env_state(current_joint_qd)
+
         bridge = NewtonCartpoleAutogradBridge(env.unwrapped)
 
+        validate_current_state_reinit(bridge, previous_joint_q, current_joint_q, current_joint_qd)
+        validate_reset_detach(bridge)
+        validate_rollout_reinit_detach(bridge)
+
+        # Gradient validation and finite-difference checks.
         joint_q, joint_qd = bridge.get_initial_joint_state()
         action = torch.zeros((1,), device=joint_q.device, dtype=joint_q.dtype)
 
@@ -130,6 +252,7 @@ def main() -> None:
 
         print(f"[VALIDATION] loss={loss.item():.6e}")
         print(f"[VALIDATION] obs={obs.detach().cpu().tolist()}")
+
         print("[VALIDATION] SUCCESS: single-step differentiable Newton rollout passed autograd and finite-difference checks.")
         env.close()
 

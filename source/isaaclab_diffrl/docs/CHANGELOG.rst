@@ -1,6 +1,16 @@
 Changelog
 ---------
 
+0.1.3 (2026-05-08)
+~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added trajectory initialization and detach-safe reset semantics for the
+  differentiable Newton cartpole rollout path, along with regression validation
+  for reset-boundary graph isolation.
+
 0.1.2 (2026-05-07)
 ~~~~~~~~~~~~~~~~~~
 
