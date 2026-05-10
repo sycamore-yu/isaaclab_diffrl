@@ -220,8 +220,6 @@ class NewtonCartpoleAutogradBridge:
         zeroes it), it is zeroed here to prevent stale tape references from
         causing ``Warp CUDA error 700`` when we modify the captured arrays.
         """
-        # Drop any previous tape reference.  Do NOT call tape.zero() on it --
-        # Warp 1.12 tape.zero() poisons the shared state/control arrays.
         if self._step_tape is not None:
             self._step_tape = None
             self._clear_grad_refs()
