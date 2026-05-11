@@ -20,7 +20,7 @@ from isaaclab_tasks.utils import add_launcher_args, launch_simulation, resolve_t
 sys.argv = [sys.argv[0]]
 
 import isaaclab_diffrl.tasks  # noqa: F401
-from isaaclab_diffrl.tasks.direct.isaaclab_diffrl.newton_torch_autograd import NewtonCartpoleAutogradBridge
+from isaaclab_diffrl.rollout import NewtonCartpoleAutogradBridge
 
 
 TASK_NAME = "Isaac-Cartpole-DiffRL-Newton-v0"
@@ -28,6 +28,8 @@ TASK_NAME = "Isaac-Cartpole-DiffRL-Newton-v0"
 
 def compute_loss(obs: torch.Tensor) -> torch.Tensor:
     """Loss that depends on both cart position/velocity and pole angle."""
+    if obs.ndim == 2:
+        obs = obs[0]
     return obs[2] + 0.5 * obs[3] + 0.05 * obs[0].square()
 
 

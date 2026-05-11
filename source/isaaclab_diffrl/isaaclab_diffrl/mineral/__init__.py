@@ -3,8 +3,9 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Mineral integration helpers for isaaclab_diffrl."""
+"""Backward-compatible Mineral exports for isaaclab_diffrl."""
 
+from ..integrations.mineral import MineralDirectEnvAdapter, TransitionGradReport
 from .cartpole_env import MineralCartpoleEnvAdapter
 
-__all__ = ["MineralCartpoleEnvAdapter"]
+__all__ = ["MineralDirectEnvAdapter", "MineralCartpoleEnvAdapter", "TransitionGradReport"]

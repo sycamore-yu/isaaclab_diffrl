@@ -16,35 +16,37 @@ Issue 03 layer:
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from typing import Any
 
 import torch
 
+from ..contracts import DirectTaskProtocol
 from .isaaclab_diffrl_env import IsaaclabDiffrlEnv
 
 
-class IsaaclabDiffrlNewtonEnv(IsaaclabDiffrlEnv):
+class IsaaclabDiffrlNewtonEnv(IsaaclabDiffrlEnv, DirectTaskProtocol):
     """Newton-backed cartpole environment for differentiable rollout validation.
 
     Extends the base cartpole env with explicit trajectory-initialisation and
     reset-detach semantics required for differentiable-rollout workflows.
     """
 
+    def __init__(self, cfg, render_mode: str | None = None, **kwargs):
+        self._cached_obs_before_reset = None
+        super().__init__(cfg, render_mode=render_mode, **kwargs)
+
     def _zero_bridge_tape(self) -> None:
-        """Zero any uncleared tape on the active Newton bridge.
+        """Zero any uncleared tape references on the active Newton bridge.
 
         A ``NewtonCartpoleAutogradBridge`` registers itself as
-        ``self._active_bridge``.  If the bridge's last ``step()`` was never
-        backwarded the tape still holds internal Warp references to the
-        shared state arrays; launching any kernel (``clear_forces``,
-        ``assign``, ``eval_fk``, solver internals) on those arrays would
-        trigger ``CUDA error 700``.
+        ``self._active_bridge``.  If a previous bridge operation left
+        grad references on the shared state arrays, launching any kernel
+        (``clear_forces``, ``assign``, ``eval_fk``, solver internals) on
+        those arrays would trigger ``CUDA error 700``.
         """
         bridge = getattr(self, "_active_bridge", None)
-        if bridge is not None and bridge._step_tape is not None:
-            bridge._step_tape = None
+        if bridge is not None:
             bridge._clear_grad_refs()
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
@@ -74,7 +76,8 @@ class IsaaclabDiffrlNewtonEnv(IsaaclabDiffrlEnv):
         # IsaacLab articulation pipeline entirely.
         default_joint_pos = wp.to_torch(self.robot.data.default_joint_pos).detach().clone()
         pole_angle_noise = sample_uniform(
-            -0.25 * math.pi, 0.25 * math.pi,
+            float(self.cfg.initial_pole_angle_range[0]),
+            float(self.cfg.initial_pole_angle_range[1]),
             default_joint_pos[:, self._pole_dof_idx].shape,
             default_joint_pos.device,
         )
@@ -118,7 +121,7 @@ class IsaaclabDiffrlNewtonEnv(IsaaclabDiffrlEnv):
         """Return the active Newton rollout bridge, creating one on demand."""
         bridge = getattr(self, "_active_bridge", None)
         if bridge is None:
-            from .newton_torch_autograd import NewtonCartpoleAutogradBridge
+            from isaaclab_diffrl.rollout import NewtonCartpoleAutogradBridge
 
             bridge = NewtonCartpoleAutogradBridge(self)
         return bridge

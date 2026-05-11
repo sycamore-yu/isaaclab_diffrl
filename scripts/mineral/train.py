@@ -32,7 +32,7 @@ import isaaclab_tasks  # noqa: F401,E402
 from isaaclab_tasks.utils import add_launcher_args, launch_simulation, resolve_task_config  # noqa: E402
 
 import isaaclab_diffrl.tasks  # noqa: F401,E402
-from isaaclab_diffrl.mineral import MineralCartpoleEnvAdapter  # noqa: E402
+from isaaclab_diffrl.integrations.mineral import MineralDirectEnvAdapter  # noqa: E402
 from mineral.agents.diffrl.bptt import BPTT  # noqa: E402
 from mineral.agents.diffrl.shac import SHAC  # noqa: E402
 
@@ -40,7 +40,7 @@ with contextlib.suppress(ImportError):
     import isaaclab_tasks_experimental  # noqa: F401,E402
 
 SUPPORTED_TASKS = {
-    "Isaac-Cartpole-DiffRL-Newton-v0": MineralCartpoleEnvAdapter,
+    "Isaac-Cartpole-DiffRL-Newton-v0": MineralDirectEnvAdapter,
 }
 
 
@@ -132,7 +132,7 @@ def build_cfg(args_cli: argparse.Namespace, rl_device: str) -> OmegaConf:
         "actor": "Actor",
         "actor_kwargs": {
             "mlp_kwargs": {
-                "units": [32, 32],
+                "units": [64, 64],
                 "norm_type": "LayerNorm",
                 "act_type": "ELU",
             }
@@ -157,6 +157,7 @@ def build_cfg(args_cli: argparse.Namespace, rl_device: str) -> OmegaConf:
             "lr_schedule": lr_schedule,
             "max_grad_norm": 1.0,
             "truncate_grads": True,
+            "stop_sigma": args_cli.stop_sigma,
             "gamma": 0.99,
             "normalize_ret": False,
         }
@@ -164,7 +165,7 @@ def build_cfg(args_cli: argparse.Namespace, rl_device: str) -> OmegaConf:
         agent_cfg["network"]["critic"] = "Critic"
         agent_cfg["network"]["critic_kwargs"] = {
             "mlp_kwargs": {
-                "units": [32, 32],
+                "units": [64, 64],
                 "norm_type": "LayerNorm",
                 "act_type": "ELU",
             }
@@ -189,6 +190,7 @@ def build_cfg(args_cli: argparse.Namespace, rl_device: str) -> OmegaConf:
             "share_encoder": True,
             "max_grad_norm": 1.0,
             "truncate_grads": True,
+            "stop_sigma": args_cli.stop_sigma,
         }
         if args_cli.critic_method == "td-lambda":
             agent_cfg["shac"]["lambda"] = args_cli.td_lambda
@@ -212,7 +214,7 @@ def make_logdir(args_cli: argparse.Namespace) -> Path:
     return (REPO_ROOT / "logs" / "mineral" / args_cli.algo / f"{stamp}{run_name}").resolve()
 
 
-def build_agent(args_cli: argparse.Namespace, cfg: OmegaConf, logdir: Path, adapter: MineralCartpoleEnvAdapter):
+def build_agent(args_cli: argparse.Namespace, cfg: OmegaConf, logdir: Path, adapter: MineralDirectEnvAdapter):
     if args_cli.algo == "bptt":
         return BPTT(cfg, logdir=str(logdir), env=adapter)
     return SHAC(cfg, logdir=str(logdir), env=adapter)
@@ -221,11 +223,11 @@ def build_agent(args_cli: argparse.Namespace, cfg: OmegaConf, logdir: Path, adap
 parser = argparse.ArgumentParser(description="Train a Mineral agent with an IsaacLab DiffRL task.")
 parser.add_argument("--task", type=str, default="Isaac-Cartpole-DiffRL-Newton-v0", help="Name of the task.")
 parser.add_argument("--algo", type=str, default="bptt", choices=("bptt", "shac"), help="Mineral algorithm.")
-parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
+parser.add_argument("--num_envs", type=int, default=64, help="Number of environments to simulate.")
 parser.add_argument("--seed", type=int, default=42, help="Seed used for the environment and agent.")
-parser.add_argument("--max_epochs", type=int, default=1, help="Number of training epochs.")
+parser.add_argument("--max_epochs", type=int, default=500, help="Number of training epochs.")
 parser.add_argument("--max_agent_steps", type=int, default=None, help="Maximum agent steps per training run.")
-parser.add_argument("--horizon_len", type=int, default=1, help="Rollout horizon length.")
+parser.add_argument("--horizon_len", type=int, default=32, help="Rollout horizon length.")
 parser.add_argument("--learning_rate", type=float, default=None, help="Actor learning rate for Adam optimizers.")
 parser.add_argument("--critic_learning_rate", type=float, default=None, help="Optional critic learning rate override.")
 parser.add_argument("--print_every", type=int, default=1, help="Logging interval in epochs.")
@@ -243,6 +245,7 @@ parser.add_argument("--action_scale", type=float, default=None, help="Optional e
 parser.add_argument("--wandb_mode", type=str, default="disabled", help="Weights & Biases mode.")
 parser.add_argument("--logdir", type=str, default=None, help="Optional explicit log directory.")
 parser.add_argument("--run_name", type=str, default=None, help="Optional log directory suffix.")
+parser.add_argument("--stop_sigma", type=float, default=None, help="Stop training if sigma falls below this value.")
 add_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 sys.argv = [sys.argv[0]] + hydra_args
@@ -289,6 +292,9 @@ def main() -> None:
         if args_cli.episode_length is not None:
             adapter.episode_length = args_cli.episode_length
             adapter.max_episode_length = args_cli.episode_length
+        bridge = getattr(adapter, "bridge", None)
+        if bridge is not None:
+            bridge.reserve_step_slots(args_cli.horizon_len)
 
         wandb.init(mode=args_cli.wandb_mode)
         try:

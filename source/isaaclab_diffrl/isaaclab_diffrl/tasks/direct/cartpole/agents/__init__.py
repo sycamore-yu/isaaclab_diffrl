@@ -2,5 +2,3 @@
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
-
-"""Legacy compatibility package for the old direct task namespace."""

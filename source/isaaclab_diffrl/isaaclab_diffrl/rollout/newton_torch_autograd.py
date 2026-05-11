@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import warp as wp
 from newton import eval_fk
@@ -14,6 +16,15 @@ from newton import eval_fk
 from isaaclab_newton.physics.newton_manager import NewtonManager
 
 from .differentiable_newton_manager import DifferentiableNewtonManager
+
+
+@dataclass
+class _StepSlot:
+    state_in: object
+    state_out: object
+    control: object
+    contacts: object | None
+    in_use: bool = False
 
 
 class NewtonCartpoleStepFunction(torch.autograd.Function):
@@ -27,7 +38,7 @@ class NewtonCartpoleStepFunction(torch.autograd.Function):
         joint_qd: torch.Tensor,
         joint_f: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        state_in, state_out, control, contacts = bridge.create_step_buffers(joint_q, joint_qd, joint_f)
+        slot_index, state_in, state_out, control, contacts = bridge.create_step_buffers(joint_q, joint_qd, joint_f)
 
         tape = wp.Tape()
         with tape:
@@ -43,6 +54,8 @@ class NewtonCartpoleStepFunction(torch.autograd.Function):
             next_joint_q = wp.to_torch(output_state.joint_q).clone()
             next_joint_qd = wp.to_torch(output_state.joint_qd).clone()
 
+        ctx.bridge = bridge
+        ctx.slot_index = slot_index
         ctx.state_in = state_in
         ctx.output_state = output_state
         ctx.control = control
@@ -76,6 +89,7 @@ class NewtonCartpoleStepFunction(torch.autograd.Function):
 
         # Using official tape.zero() as requested
         tape.zero()
+        ctx.bridge.release_step_slot(ctx.slot_index)
 
         return None, grad_joint_q_in, grad_joint_qd_in, grad_joint_f
 
@@ -109,14 +123,25 @@ class NewtonCartpoleAutogradBridge:
         "state_out": ("body_f", "body_q", "body_qd", "joint_q", "joint_qd"),
         "control": ("joint_act", "joint_f", "joint_target_pos", "joint_target_vel"),
     }
+    _CONTACT_TENSOR_NAMES = (
+        "rigid_contact_diff_distance",
+        "rigid_contact_diff_normal",
+        "rigid_contact_diff_point0_world",
+        "rigid_contact_diff_point1_world",
+        "soft_contact_body_pos",
+        "soft_contact_body_vel",
+        "soft_contact_normal",
+        "force",
+    )
 
-    def __init__(self, env) -> None:
+    def __init__(self, env, num_envs: int, action_scale: float, cart_dof_idx: int) -> None:
         self.env = env
         # Register on the env so env.reset() can zero any uncleared tape
         # before touching the shared Newton state arrays.
         env._active_bridge = self
-        self.cart_dof_idx = int(env._cart_dof_idx[0])
-        self.action_scale = float(env.cfg.action_scale)
+        self.num_envs = num_envs
+        self.action_scale = action_scale
+        self.cart_dof_idx = cart_dof_idx
 
         self._ensure_differentiable_manager()
 
@@ -133,8 +158,9 @@ class NewtonCartpoleAutogradBridge:
         self.initial_joint_q = wp.to_torch(self.state_in.joint_q).clone()
         self.initial_joint_qd = wp.to_torch(self.state_in.joint_qd).clone()
         self.control_template_joint_f = wp.to_torch(self.control.joint_f).clone()
-        self._step_tape = None
+        self._step_slots: list[_StepSlot] = []
         self.initialize_trajectory()
+        self.reserve_step_slots(1)
 
     @staticmethod
     def _array_requires_grad(array) -> bool:
@@ -191,8 +217,10 @@ class NewtonCartpoleAutogradBridge:
 
         # Detach so env lifecycle ops (_reset_idx in-place writes) can modify
         # these leaf tensors without triggering autograd errors.
-        self.env.joint_pos = wp.to_torch(self.env.robot.data.joint_pos).detach()
-        self.env.joint_vel = wp.to_torch(self.env.robot.data.joint_vel).detach()
+        if hasattr(self.env, "joint_pos"):
+            self.env.joint_pos = wp.to_torch(self.env.robot.data.joint_pos).detach()
+        if hasattr(self.env, "joint_vel"):
+            self.env.joint_vel = wp.to_torch(self.env.robot.data.joint_vel).detach()
 
     def _detach_joint_state(
         self,
@@ -215,14 +243,8 @@ class NewtonCartpoleAutogradBridge:
         clears forces and gradient history.  Avoids ``state_out.assign(state_in)``
         because the solver may attach extra arrays (e.g. ``body_f_ext``) to one
         state during a differentiated step, making a full assign fail.
-
-        If a prior ``step()`` tape was never backwarded (its ``backward()``
-        zeroes it), it is zeroed here to prevent stale tape references from
-        causing ``Warp CUDA error 700`` when we modify the captured arrays.
         """
-        if self._step_tape is not None:
-            self._step_tape = None
-            self._clear_grad_refs()
+        self._clear_grad_refs()
 
         joint_q, joint_qd = self._detach_joint_state(joint_q, joint_qd)
 
@@ -271,6 +293,69 @@ class NewtonCartpoleAutogradBridge:
         """Copy a Torch tensor back into a Warp array."""
         array.assign(wp.from_torch(tensor.contiguous(), dtype=array.dtype, requires_grad=False))
 
+    @staticmethod
+    def _collect_owner_arrays(owner, tensor_names: tuple[str, ...], seen: set[int] | None = None) -> list:
+        seen = set() if seen is None else seen
+        arrays = []
+        for tensor_name in tensor_names:
+            array = getattr(owner, tensor_name, None)
+            if array is None:
+                continue
+            array_id = id(array)
+            if array_id in seen:
+                continue
+            seen.add(array_id)
+            arrays.append(array)
+        return arrays
+
+    @classmethod
+    def _collect_step_slot_arrays(cls, slot: _StepSlot) -> list:
+        seen: set[int] = set()
+        arrays = cls._collect_owner_arrays(slot.state_in, cls._CHECKPOINT_TENSOR_NAMES["state_in"], seen)
+        arrays.extend(cls._collect_owner_arrays(slot.state_out, cls._CHECKPOINT_TENSOR_NAMES["state_out"], seen))
+        arrays.extend(cls._collect_owner_arrays(slot.control, cls._CHECKPOINT_TENSOR_NAMES["control"], seen))
+        if slot.contacts is not None:
+            arrays.extend(cls._collect_owner_arrays(slot.contacts, cls._CONTACT_TENSOR_NAMES, seen))
+        return arrays
+
+    @staticmethod
+    def _zero_array_grad(array) -> None:
+        grad = getattr(array, "grad", None)
+        if grad is not None:
+            grad.zero_()
+
+    @staticmethod
+    def _clear_array_grad_ref(array) -> None:
+        if getattr(array, "grad", None) is not None:
+            array.grad = None
+
+    def _build_step_slot(self) -> _StepSlot:
+        state_in = self.model.state()
+        state_out = state_in if self.use_single_state else self.model.state()
+        control = self.model.control()
+        contacts = self.collision_pipeline.contacts() if self.collision_pipeline is not None else self.contacts
+        return _StepSlot(state_in=state_in, state_out=state_out, control=control, contacts=contacts)
+
+    def reserve_step_slots(self, capacity: int) -> None:
+        while len(self._step_slots) < capacity:
+            self._step_slots.append(self._build_step_slot())
+
+    def _acquire_step_slot(self) -> tuple[int, _StepSlot]:
+        for slot_index, slot in enumerate(self._step_slots):
+            if slot.in_use:
+                continue
+            slot.in_use = True
+            return slot_index, slot
+
+        slot_index = len(self._step_slots)
+        slot = self._build_step_slot()
+        slot.in_use = True
+        self._step_slots.append(slot)
+        return slot_index, slot
+
+    def release_step_slot(self, slot_index: int) -> None:
+        self._step_slots[slot_index].in_use = False
+
     def _capture_tensor_group(self, owner, group_name: str) -> dict[str, torch.Tensor]:
         """Capture selected rollout tensors from one Newton object."""
         payload: dict[str, torch.Tensor] = {}
@@ -283,8 +368,10 @@ class NewtonCartpoleAutogradBridge:
 
     def _sync_env_joint_buffers(self, joint_q: torch.Tensor, joint_qd: torch.Tensor) -> None:
         """Mirror rollout joint state onto the env-owned observability tensors."""
-        self.env.joint_pos[:] = joint_q.reshape_as(self.env.joint_pos)
-        self.env.joint_vel[:] = joint_qd.reshape_as(self.env.joint_vel)
+        if hasattr(self.env, "joint_pos"):
+            self.env.joint_pos[:] = joint_q.reshape_as(self.env.joint_pos)
+        if hasattr(self.env, "joint_vel"):
+            self.env.joint_vel[:] = joint_qd.reshape_as(self.env.joint_vel)
 
     def _restore_tensor_group(self, owner, payload: dict[str, torch.Tensor]) -> None:
         """Restore selected rollout tensors onto one Newton object."""
@@ -310,10 +397,6 @@ class NewtonCartpoleAutogradBridge:
 
     def restore_checkpoint(self, checkpoint: dict[str, dict[str, torch.Tensor]]) -> None:
         """Restore a differentiable rollout checkpoint payload."""
-        if self._step_tape is not None:
-            self._step_tape = None
-            self._clear_grad_refs()
-
         self._restore_tensor_group(self.model, checkpoint["model"])
         self._restore_tensor_group(self.state_in, checkpoint["state_in"])
         self._restore_tensor_group(self.state_out, checkpoint["state_out"])
@@ -331,7 +414,7 @@ class NewtonCartpoleAutogradBridge:
 
     def expand_action(self, actions: torch.Tensor) -> torch.Tensor:
         """Map Torch cart actions to a full Newton joint-force tensor."""
-        action_view = actions.reshape(self.env.num_envs, -1)
+        action_view = actions.reshape(self.num_envs, -1)
         joint_f = torch.zeros_like(self.control_template_joint_f).reshape(self.env.num_envs, -1)
         joint_f[:, self.cart_dof_idx] = action_view[:, 0] * self.action_scale
         return joint_f.reshape_as(self.control_template_joint_f)
@@ -342,36 +425,23 @@ class NewtonCartpoleAutogradBridge:
         joint_qd: torch.Tensor,
         joint_f: torch.Tensor,
     ):
-        """Allocate per-step Newton buffers for one differentiable transition."""
-        state_in = self.model.state()
-        state_in.joint_q.assign(wp.from_torch(joint_q.contiguous(), dtype=state_in.joint_q.dtype, requires_grad=False))
-        state_in.joint_qd.assign(wp.from_torch(joint_qd.contiguous(), dtype=state_in.joint_qd.dtype, requires_grad=False))
-        state_in.clear_forces()
+        """Populate one preallocated step slot for a differentiable transition."""
+        slot_index, slot = self._acquire_step_slot()
 
-        if self.use_single_state:
-            state_out = state_in
-        else:
-            state_out = self.model.state()
-            state_out.clear_forces()
+        slot.state_in.joint_q.assign(wp.from_torch(joint_q.contiguous(), dtype=slot.state_in.joint_q.dtype, requires_grad=False))
+        slot.state_in.joint_qd.assign(wp.from_torch(joint_qd.contiguous(), dtype=slot.state_in.joint_qd.dtype, requires_grad=False))
+        slot.state_in.clear_forces()
 
-        control = self.model.control()
-        control.joint_f.zero_()
-        control.joint_f.assign(wp.from_torch(joint_f.contiguous(), dtype=control.joint_f.dtype, requires_grad=False))
-        contacts = self.collision_pipeline.contacts() if self.collision_pipeline is not None else self.contacts
-        return state_in, state_out, control, contacts
+        if not self.use_single_state:
+            slot.state_out.clear_forces()
+
+        slot.control.joint_f.zero_()
+        slot.control.joint_f.assign(wp.from_torch(joint_f.contiguous(), dtype=slot.control.joint_f.dtype, requires_grad=False))
+        return slot_index, slot.state_in, slot.state_out, slot.control, slot.contacts
 
     def prepare_inputs(self, joint_q: torch.Tensor, joint_qd: torch.Tensor, joint_f: torch.Tensor) -> None:
-        """Copy Torch inputs into differentiable Newton state/control buffers.
-
-        If a stale tape from a prior ``step()`` that was never backwarded
-        still exists on this bridge, it is zeroed *before* we write to the
-        buffers.  This prevents an uncleared tape from holding internal
-        references to the arrays and causing ``Warp CUDA error 700`` on
-        subsequent kernel launches.
-        """
-        if self._step_tape is not None:
-            self._step_tape = None
-            self._clear_grad_refs()
+        """Copy Torch inputs into differentiable Newton state/control buffers."""
+        self._clear_grad_refs()
 
         self.control.joint_f.zero_()
         self.state_in.clear_forces()
@@ -385,18 +455,21 @@ class NewtonCartpoleAutogradBridge:
 
     def clear_dynamic_grads(self) -> None:
         """Zero gradients on dynamic buffers reused across bridge calls."""
-        for array in (self.state_in.joint_q, self.state_in.joint_qd, self.state_out.joint_q, self.state_out.joint_qd):
-            if array.grad is not None:
-                array.grad.zero_()
-        if self.control.joint_f is not None and self.control.joint_f.grad is not None:
-            self.control.joint_f.grad.zero_()
+        seen: set[int] = set()
+        arrays = self._collect_owner_arrays(self.state_in, self._CHECKPOINT_TENSOR_NAMES["state_in"], seen)
+        arrays.extend(self._collect_owner_arrays(self.state_out, self._CHECKPOINT_TENSOR_NAMES["state_out"], seen))
+        arrays.extend(self._collect_owner_arrays(self.control, self._CHECKPOINT_TENSOR_NAMES["control"], seen))
+        for array in arrays:
+            self._zero_array_grad(array)
 
     def _clear_grad_refs(self) -> None:
         """Nullify grad references after tape.zero() to prevent use-after-free."""
-        for array in (self.state_in.joint_q, self.state_in.joint_qd, self.state_out.joint_q, self.state_out.joint_qd):
-            array.grad = None
-        if self.control.joint_f is not None:
-            self.control.joint_f.grad = None
+        seen: set[int] = set()
+        arrays = self._collect_owner_arrays(self.state_in, self._CHECKPOINT_TENSOR_NAMES["state_in"], seen)
+        arrays.extend(self._collect_owner_arrays(self.state_out, self._CHECKPOINT_TENSOR_NAMES["state_out"], seen))
+        arrays.extend(self._collect_owner_arrays(self.control, self._CHECKPOINT_TENSOR_NAMES["control"], seen))
+        for array in arrays:
+            self._clear_array_grad_ref(array)
 
     def step_forward(
         self,
@@ -443,8 +516,8 @@ class NewtonCartpoleAutogradBridge:
     ) -> torch.Tensor:
         """Run one step and return the cartpole observation tensor."""
         next_joint_q, next_joint_qd = self.step(joint_q, joint_qd, actions)
-        joint_q_view = next_joint_q.reshape(self.env.num_envs, -1)
-        joint_qd_view = next_joint_qd.reshape(self.env.num_envs, -1)
+        joint_q_view = next_joint_q.reshape(-1, 2)
+        joint_qd_view = next_joint_qd.reshape(-1, 2)
         return torch.stack(
             (
                 joint_q_view[:, 1],

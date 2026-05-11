@@ -175,10 +175,12 @@ def main() -> None:
             raise RuntimeError("AC2 FAIL: timeout probe did not report a truncated terminal step.")
         if set(timeout_probe_terminal_obs.keys()) != {"obs"}:
             raise RuntimeError(f"AC2 FAIL: terminal observation dict keys={tuple(timeout_probe_terminal_obs.keys())}")
-        if not torch.allclose(timeout_probe_terminal_obs["obs"], timeout_probe_next_obs):
-            raise RuntimeError("AC2 FAIL: terminal observation dict does not match the terminal transition observation.")
+        if torch.allclose(timeout_probe_terminal_obs["obs"], timeout_probe_next_obs):
+            raise RuntimeError("AC2 FAIL: returned observation did not advance to the post-reset state.")
         if not torch.isfinite(timeout_probe_terminal_obs["obs"]).all():
             raise RuntimeError("AC2 FAIL: timeout probe terminal observation contains non-finite values.")
+        if not torch.isfinite(timeout_probe_next_obs).all():
+            raise RuntimeError("AC2 FAIL: timeout probe post-reset observation contains non-finite values.")
 
         adapter.clear_grad()
         adapter.reset()

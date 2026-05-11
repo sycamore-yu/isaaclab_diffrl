@@ -13,7 +13,6 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from distutils.util import strtobool
 from pathlib import Path
 
 import gymnasium as gym
@@ -98,6 +97,16 @@ def _build_fallback_cfg(args_cli: argparse.Namespace, rl_device: str) -> OmegaCo
     })
 
 
+def _apply_play_overrides(agent_cfg: OmegaConf, args_cli: argparse.Namespace) -> None:
+    algo_cfg = OmegaConf.select(agent_cfg, f"agent.{args_cli.algo}")
+    if algo_cfg is None:
+        return
+    checkpoint_num_actors = OmegaConf.select(algo_cfg, "num_actors")
+    if checkpoint_num_actors != args_cli.num_envs:
+        print(f"[INFO] overriding checkpoint num_actors from {checkpoint_num_actors} to {args_cli.num_envs} for play")
+    algo_cfg.num_actors = args_cli.num_envs
+
+
 def extract_policy_obs(obs) -> dict[str, torch.Tensor]:
     if isinstance(obs, dict):
         if "obs" in obs:
@@ -105,6 +114,16 @@ def extract_policy_obs(obs) -> dict[str, torch.Tensor]:
         if "policy" in obs:
             return {"obs": obs["policy"]}
     return {"obs": obs}
+
+
+def strtobool(val):
+    val = val.lower()
+    if val in ("y", "yes", "t", "true", "on", "1"):
+        return True
+    elif val in ("n", "no", "f", "false", "off", "0"):
+        return False
+    else:
+        raise ValueError(f"invalid truth value {val}")
 
 
 parser = argparse.ArgumentParser(description="Play a Mineral checkpoint on an IsaacLab DiffRL task.")
@@ -127,18 +146,14 @@ parser.add_argument(
 parser.add_argument("--num-episodes", type=int, default=1000, help="Number of episodes to play before exiting.")
 parser.add_argument(
     "--sample-actions",
-    type=lambda x: bool(strtobool(x)),
+    action="store_true",
     default=False,
-    nargs="?",
-    const=True,
     help="Sample from the action distribution instead of using deterministic means.",
 )
 parser.add_argument(
     "--real-time",
-    type=lambda x: bool(strtobool(x)),
+    action="store_true",
     default=False,
-    nargs="?",
-    const=True,
     help="Sleep to match the environment step time.",
 )
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during playback.")
@@ -178,6 +193,13 @@ def main() -> None:
         agent_cfg = _build_fallback_cfg(args_cli, str(env_cfg.sim.device))
     else:
         agent_cfg = OmegaConf.create(agent_metadata)
+        # Auto-detect algorithm from metadata
+        if "agent" in agent_cfg and "algo" in agent_cfg.agent:
+            trained_algo = agent_cfg.agent.algo.lower()
+            if trained_algo != args_cli.algo:
+                print(f"[INFO] Auto-detecting algorithm from checkpoint: {trained_algo} (overriding {args_cli.algo})")
+                args_cli.algo = trained_algo
+    _apply_play_overrides(agent_cfg, args_cli)
     print(f"[INFO] task={args_cli.task}, algo={args_cli.algo}")
     print(f"[INFO] checkpoint={checkpoint_path}")
     print(f"[INFO] num_envs={env_cfg.scene.num_envs}")
