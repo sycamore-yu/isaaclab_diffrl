@@ -262,6 +262,7 @@ def main() -> None:
     supported_tasks = {
         "Isaac-Cartpole-DiffRL-Newton-v0": MineralDirectEnvAdapter,
         "Isaac-Drone-Position-Control-DiffRL-v0": MineralManagerBasedEnvAdapter,
+        "Isaac-Drone-Racing-DiffRL-v0": MineralManagerBasedEnvAdapter,
     }
 
     if args_cli.task not in supported_tasks:
