@@ -28,6 +28,10 @@ class DronePositionControlEnv(IsaaclabDiffrlManagerEnv):
 
         self.robot: Articulation = self.scene["robot"]
         self._active_bridge = None
+        self.arrive_time = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        self.success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.arrival_radius = 0.5
+        self.wait_before_truncate = 0.5
 
     def _get_checkpoint_bridge(self):
         """Return the active rollout bridge, creating one on demand."""
@@ -80,11 +84,16 @@ class DronePositionControlEnv(IsaaclabDiffrlManagerEnv):
         self, observation: torch.Tensor, episode_step: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute termination flags."""
-        # Time out
+        pos_error_b = observation[:, 0:3]
+        arrived = torch.linalg.norm(pos_error_b, dim=-1) < self.arrival_radius
+        curr_time = episode_step.float() * (self.cfg.sim.dt * self.cfg.decimation)
+        self.arrive_time.copy_(torch.where(arrived & (self.arrive_time == 0), curr_time, self.arrive_time))
+
         truncated = episode_step >= self.max_episode_length - 1
-        # No specific termination for now (infinite bounds for tracer bullet)
+        truncated |= arrived & (curr_time > (self.arrive_time + self.wait_before_truncate))
         terminated = torch.zeros_like(truncated)
         done = terminated | truncated
+        self.success.copy_(arrived & truncated)
         return terminated, truncated, done
 
     def initialize_trajectory_from_current_state(
@@ -104,8 +113,12 @@ class DronePositionControlEnv(IsaaclabDiffrlManagerEnv):
         self, env_ids: torch.Tensor, next_state: torch.Tensor, episode_step: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply reset logic."""
-        # For tracer bullet, we just keep the state but reset episode step
         next_state_detached = next_state.detach().clone()
+        self._reset_idx(env_ids)
+        reset_state = self.initialize_trajectory_from_current_state(env_ids)
+        next_state_detached[env_ids] = reset_state
         episode_step[env_ids] = 0
+        self.arrive_time[env_ids] = 0.0
+        self.success[env_ids] = False
         obs = self.observe_from_state(next_state_detached)
         return obs, next_state_detached
