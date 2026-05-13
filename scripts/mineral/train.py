@@ -11,7 +11,6 @@ import argparse
 import contextlib
 import sys
 from datetime import datetime
-from distutils.util import strtobool
 from pathlib import Path
 
 import gymnasium as gym
@@ -28,20 +27,23 @@ for import_root in (SOURCE_ROOT, MINERAL_ROOT):
     if import_path not in sys.path:
         sys.path.insert(0, import_path)
 
-import isaaclab_tasks  # noqa: F401,E402
-from isaaclab_tasks.utils import add_launcher_args, launch_simulation, resolve_task_config  # noqa: E402
+import isaaclab_tasks.utils as task_utils
 
-import isaaclab_diffrl.tasks  # noqa: F401,E402
-from isaaclab_diffrl.integrations.mineral import MineralDirectEnvAdapter  # noqa: E402
+# import isaaclab_tasks  # noqa: F401,E402
+# from isaaclab_tasks.utils import add_launcher_args, launch_simulation, resolve_task_config  # noqa: E402
+
+# import isaaclab_diffrl.tasks  # noqa: F401,E402
+# from isaaclab_diffrl.integrations.mineral import MineralDirectEnvAdapter, MineralManagerBasedEnvAdapter  # noqa: E402
 from mineral.agents.diffrl.bptt import BPTT  # noqa: E402
 from mineral.agents.diffrl.shac import SHAC  # noqa: E402
 
 with contextlib.suppress(ImportError):
     import isaaclab_tasks_experimental  # noqa: F401,E402
 
-SUPPORTED_TASKS = {
-    "Isaac-Cartpole-DiffRL-Newton-v0": MineralDirectEnvAdapter,
-}
+# SUPPORTED_TASKS = {
+#     "Isaac-Cartpole-DiffRL-Newton-v0": MineralDirectEnvAdapter,
+#     "Isaac-Drone-Position-Control-DiffRL-v0": MineralManagerBasedEnvAdapter,
+# }
 
 
 def resolve_learning_rate(args_cli: argparse.Namespace) -> float:
@@ -214,7 +216,7 @@ def make_logdir(args_cli: argparse.Namespace) -> Path:
     return (REPO_ROOT / "logs" / "mineral" / args_cli.algo / f"{stamp}{run_name}").resolve()
 
 
-def build_agent(args_cli: argparse.Namespace, cfg: OmegaConf, logdir: Path, adapter: MineralDirectEnvAdapter):
+def build_agent(args_cli: argparse.Namespace, cfg: OmegaConf, logdir: Path, adapter: any):
     if args_cli.algo == "bptt":
         return BPTT(cfg, logdir=str(logdir), env=adapter)
     return SHAC(cfg, logdir=str(logdir), env=adapter)
@@ -238,27 +240,37 @@ parser.add_argument("--critic_method", type=str, default="td-lambda", choices=("
 parser.add_argument("--td_lambda", type=float, default=0.95, help="Lambda used when critic_method is td-lambda.")
 parser.add_argument("--target_critic_alpha", type=float, default=0.2, help="Target critic update coefficient.")
 parser.add_argument("--lr_schedule", type=str, default=None, choices=("constant", "linear"), help="Optional learning-rate schedule override.")
-parser.add_argument("--normalize_input", type=lambda x: bool(strtobool(x)), default=None, nargs="?", const=True, help="Optional observation normalization override.")
-parser.add_argument("--tanh_clamp", type=lambda x: bool(strtobool(x)), default=None, nargs="?", const=True, help="Optional actor tanh clamp override.")
+parser.add_argument("--normalize_input", type=lambda x: x.lower() in ("yes", "true", "t", "y", "1"), default=None, nargs="?", const=True, help="Optional observation normalization override.")
+parser.add_argument("--tanh_clamp", type=lambda x: x.lower() in ("yes", "true", "t", "y", "1"), default=None, nargs="?", const=True, help="Optional actor tanh clamp override.")
 parser.add_argument("--episode_length", type=int, default=None, help="Optional adapter episode length override.")
 parser.add_argument("--action_scale", type=float, default=None, help="Optional environment action scale override.")
 parser.add_argument("--wandb_mode", type=str, default="disabled", help="Weights & Biases mode.")
 parser.add_argument("--logdir", type=str, default=None, help="Optional explicit log directory.")
 parser.add_argument("--run_name", type=str, default=None, help="Optional log directory suffix.")
 parser.add_argument("--stop_sigma", type=float, default=None, help="Stop training if sigma falls below this value.")
-add_launcher_args(parser)
+task_utils.add_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 sys.argv = [sys.argv[0]] + hydra_args
 
 
 def main() -> None:
-    if args_cli.task not in SUPPORTED_TASKS:
-        supported_tasks = ", ".join(sorted(SUPPORTED_TASKS))
-        raise ValueError(f"Unsupported Mineral task '{args_cli.task}'. Supported tasks: {supported_tasks}")
+    # Delayed imports to prevent premature PhysX/pxr initialization
+    import isaaclab_tasks  # noqa: F401
+    import isaaclab_diffrl.tasks  # noqa: F401
+    from isaaclab_diffrl.integrations.mineral import MineralDirectEnvAdapter, MineralManagerBasedEnvAdapter
+
+    supported_tasks = {
+        "Isaac-Cartpole-DiffRL-Newton-v0": MineralDirectEnvAdapter,
+        "Isaac-Drone-Position-Control-DiffRL-v0": MineralManagerBasedEnvAdapter,
+    }
+
+    if args_cli.task not in supported_tasks:
+        st_str = ", ".join(sorted(supported_tasks))
+        raise ValueError(f"Unsupported Mineral task '{args_cli.task}'. Supported tasks: {st_str}")
 
     torch.manual_seed(args_cli.seed)
 
-    env_cfg, _ = resolve_task_config(args_cli.task, "")
+    env_cfg, _ = task_utils.resolve_task_config(args_cli.task, "")
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.seed = args_cli.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
@@ -277,17 +289,17 @@ def main() -> None:
     print(f"[INFO] task={args_cli.task}")
     print(f"[INFO] algo={args_cli.algo}")
     print(f"[INFO] num_envs={args_cli.num_envs}")
-    print(f"[INFO] action_scale={env_cfg.action_scale}")
+    print(f"[INFO] action_scale={getattr(env_cfg, 'action_scale', 'N/A')}")
     print(f"[INFO] actor_learning_rate={resolve_learning_rate(args_cli)}")
     print(f"[INFO] critic_learning_rate={resolve_critic_learning_rate(args_cli)}")
     print(f"[INFO] max_agent_steps={resolve_max_agent_steps(args_cli)}")
     print(f"[INFO] logdir={logdir}")
 
-    with launch_simulation(env_cfg, args_cli):
+    with task_utils.launch_simulation(env_cfg, args_cli):
         env = gym.make(args_cli.task, cfg=env_cfg)
         env.reset()
 
-        adapter_class = SUPPORTED_TASKS[args_cli.task]
+        adapter_class = supported_tasks[args_cli.task]
         adapter = adapter_class(env.unwrapped)
         if args_cli.episode_length is not None:
             adapter.episode_length = args_cli.episode_length

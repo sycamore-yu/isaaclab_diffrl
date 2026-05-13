@@ -6,5 +6,6 @@
 """Mineral integration layer for isaaclab_diffrl."""
 
 from .direct_env_adapter import MineralDirectEnvAdapter, TransitionGradReport
+from .manager_based_env_adapter import MineralManagerBasedEnvAdapter
 
-__all__ = ["MineralDirectEnvAdapter", "TransitionGradReport"]
+__all__ = ["MineralDirectEnvAdapter", "MineralManagerBasedEnvAdapter", "TransitionGradReport"]
