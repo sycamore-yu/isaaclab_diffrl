@@ -143,17 +143,28 @@ class EventCfg:
 @configclass
 class RewardsCfg:
     """Reward terms for the MDP."""
-    terminating = RewTerm(func=mdp.is_terminated, weight=-500.0)
+    # (1) Primary task: reach target gate (Continuous Pulling)
+    pos_error = RewTerm(func=mdp.position_l2_error, weight=-3.0, params={"command_name": "target"})
+    # (2) Progress along the track (Dense Reward)
     progress = RewTerm(func=mdp.progress, weight=20.0, params={"command_name": "target"})
-    gate_passed = RewTerm(func=mdp.gate_passed, weight=400.0, params={"command_name": "target"})
-    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.001)
+    # (3) Gate passage incentive (Discrete Bonus - Reduced to prevent gradient shock)
+    gate_passed = RewTerm(func=mdp.gate_passed, weight=100.0, params={"command_name": "target"})
+    # (4) Stability and effort penalties (Differentiable loss)
+    ang_vel_l2 = RewTerm(func=mdp.ang_vel_l2, weight=-0.1)
     lin_vel = RewTerm(func=mdp.velocity_l2, weight=-0.01)
+    # (5) Failure penalty
+    terminating = RewTerm(func=mdp.is_terminated, weight=-100.0)
 
+
+import isaaclab.envs.mdp as isaaclab_mdp
 
 @configclass
 class TerminationsCfg:
     """Termination terms for the MDP."""
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    bad_orientation = DoneTerm(func=isaaclab_mdp.bad_orientation, params={"limit_angle": 1.57}) # 90 degrees
+    root_height_below_minimum = DoneTerm(func=isaaclab_mdp.root_height_below_minimum, params={"minimum_height": 0.1})
+
 
 
 @configclass
@@ -161,6 +172,7 @@ class DroneRacingEnvCfg(ManagerBasedRLEnvCfg):
     # Scene settings
     scene: DroneRacingSceneCfg = DroneRacingSceneCfg(num_envs=64, env_spacing=8.0)
     # Basic settings
+    action_scale: float = 1.0
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()

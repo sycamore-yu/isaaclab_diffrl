@@ -89,7 +89,10 @@ class MineralManagerBasedEnvAdapter:
         self._episode_step += 1
 
         terminal_obs = self.env.observe_from_state(next_state)
-        terminated, truncated, done = self.env.terminal_flags_from_observation(terminal_obs, self._episode_step)
+        if hasattr(self.env, "terminal_flags_from_state"):
+            terminated, truncated, done = self.env.terminal_flags_from_state(next_state, self._episode_step)
+        else:
+            terminated, truncated, done = self.env.terminal_flags_from_observation(terminal_obs, self._episode_step)
         reward = self.env.reward_from_observation(terminal_obs, terminated)
 
         done_env_ids = torch.nonzero(done, as_tuple=False).squeeze(-1)

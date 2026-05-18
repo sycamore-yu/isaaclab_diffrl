@@ -107,9 +107,13 @@ class GateProgressionCommand(CommandTerm):
         forward_vec = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
         gate_normal = quat_apply(next_gate_quat, forward_vec)
 
+        robot_pos_w = self.robot.data.root_pos_w
+        if isinstance(robot_pos_w, wp.array):
+            robot_pos_w = wp.to_torch(robot_pos_w)
+
         # Vector from gate to drone
         rel_pos_old = self._prev_robot_pos_w - self.next_gate_w[:, :3]
-        rel_pos_new = self.robot.data.root_pos_w - self.next_gate_w[:, :3]
+        rel_pos_new = robot_pos_w - self.next_gate_w[:, :3]
 
         # Projection onto normal
         proj_old = torch.bmm(rel_pos_old.view(self.num_envs, 1, 3), gate_normal.view(self.num_envs, 3, 1)).squeeze()
@@ -119,7 +123,7 @@ class GateProgressionCommand(CommandTerm):
         passed_plane = (proj_old < 0) & (proj_new > 0)
 
         # Within aperture check
-        within_aperture = torch.norm(self.robot.data.root_pos_w - self.next_gate_w[:, :3], dim=1) < self.cfg.gate_size
+        within_aperture = torch.norm(robot_pos_w - self.next_gate_w[:, :3], dim=1) < self.cfg.gate_size
 
         self._gate_passed[:] = passed_plane & within_aperture
 
@@ -130,7 +134,7 @@ class GateProgressionCommand(CommandTerm):
             self._update_gate_poses(passed_ids)
 
         # Store current pos for next step
-        self._prev_robot_pos_w[:] = self.robot.data.root_pos_w
+        self._prev_robot_pos_w[:] = robot_pos_w
 
     def _update_gate_poses(self, env_ids: torch.Tensor):
         """Update gate poses for specified envs."""

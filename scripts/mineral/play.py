@@ -37,6 +37,7 @@ import isaaclab_tasks  # noqa: F401,E402
 from isaaclab_tasks.utils import add_launcher_args, get_checkpoint_path, launch_simulation, resolve_task_config  # noqa: E402
 
 import isaaclab_diffrl.tasks  # noqa: F401,E402
+from isaaclab_diffrl.integrations.mineral import MineralDirectEnvAdapter, MineralManagerBasedEnvAdapter  # noqa: E402
 from mineral.agents.diffrl.bptt import BPTT  # noqa: E402
 from mineral.agents.diffrl.shac import SHAC  # noqa: E402
 
@@ -45,6 +46,8 @@ with contextlib.suppress(ImportError):
 
 SUPPORTED_TASKS = {
     "Isaac-Cartpole-DiffRL-Newton-v0": "cartpole",
+    "Isaac-Drone-Position-Control-DiffRL-v0": "manager",
+    "Isaac-Drone-Racing-DiffRL-v0": "manager",
 }
 
 
@@ -207,16 +210,30 @@ def main() -> None:
     with launch_simulation(env_cfg, args_cli):
         env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
+        task_type = SUPPORTED_TASKS[args_cli.task]
+        adapter = None
         policy_episode_length = env.unwrapped.max_episode_length
-        policy_env = PolicyEnvSpec(
-            num_envs=args_cli.num_envs,
-            num_obs=4,
-            num_actions=1,
-            episode_length=policy_episode_length,
-            max_episode_length=policy_episode_length,
-            observation_space=spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32),
-            action_space=spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32),
-        )
+        if task_type == "cartpole":
+            policy_env = PolicyEnvSpec(
+                num_envs=args_cli.num_envs,
+                num_obs=4,
+                num_actions=1,
+                episode_length=policy_episode_length,
+                max_episode_length=policy_episode_length,
+                observation_space=spaces.Box(low=-np.inf, high=np.inf, shape=(4,), dtype=np.float32),
+                action_space=spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32),
+            )
+        else:
+            adapter = MineralManagerBasedEnvAdapter(env.unwrapped)
+            policy_env = PolicyEnvSpec(
+                num_envs=args_cli.num_envs,
+                num_obs=adapter.num_obs,
+                num_actions=adapter.num_actions,
+                episode_length=adapter.episode_length,
+                max_episode_length=adapter.max_episode_length,
+                observation_space=adapter.observation_space,
+                action_space=adapter.action_space,
+            )
 
         agent = build_agent(args_cli, agent_cfg, log_dir, policy_env)
         print(f"[INFO] Loading model checkpoint from: {checkpoint_path}")
@@ -238,7 +255,10 @@ def main() -> None:
             env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
         with torch.inference_mode():
-            raw_obs, _ = env.reset()
+            if adapter is None:
+                raw_obs, _ = env.reset()
+            else:
+                raw_obs = adapter.reset()
         obs = agent._convert_obs(extract_policy_obs(raw_obs))
         episode_rewards = torch.zeros(args_cli.num_envs, dtype=torch.float32, device=env.unwrapped.device)
         episode_lengths = torch.zeros(args_cli.num_envs, dtype=torch.int32, device=env.unwrapped.device)
@@ -253,9 +273,19 @@ def main() -> None:
                     policy_obs = {key: agent.obs_rms[key].normalize(value) for key, value in obs.items()}
                 with torch.inference_mode():
                     actions = agent.get_actions(policy_obs, sample=args_cli.sample_actions).detach()
-                    obs, reward, terminated, truncated, _ = env.step(actions)
+                    if adapter is None:
+                        obs, reward, terminated, truncated, _ = env.step(actions)
+                        done = terminated | truncated
+                    else:
+                        obs, reward, done, _ = adapter.step(actions)
+                        # Push diff-RL state to physics and explicitly render for visualizers
+                        state = adapter._trajectory_state
+                        if hasattr(env.unwrapped, "robot"):
+                            env.unwrapped.robot.write_root_state_to_sim(state)
+                            env.unwrapped.robot.write_data_to_sim()
+                        if hasattr(env.unwrapped.sim, "render"):
+                            env.unwrapped.sim.render()
                 obs = agent._convert_obs(extract_policy_obs(obs))
-                done = terminated | truncated
 
                 episode_rewards += reward
                 episode_lengths += 1

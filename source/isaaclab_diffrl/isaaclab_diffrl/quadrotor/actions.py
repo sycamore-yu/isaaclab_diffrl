@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import torch
+import warp as wp
 import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation
 from isaaclab.managers import ActionTerm, ActionTermCfg
@@ -61,6 +62,8 @@ class QuadrotorRateAction(ActionTerm):
         # Action: [normed_thrust, roll_rate, pitch_rate, yaw_rate]
         # Body-frame angular velocity
         actual_angvel_b = self._robot.data.root_ang_vel_b
+        if isinstance(actual_angvel_b, wp.array):
+            actual_angvel_b = wp.to_torch(actual_angvel_b)
 
         desired_angvel_b = self._raw_actions[:, 1:]
         angvel_err = desired_angvel_b - actual_angvel_b

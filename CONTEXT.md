@@ -59,3 +59,31 @@ The differentiable training rollout uses Newton's official low-level diffsim pat
 - On `2026-05-11`, the play command completed task resolution, environment setup, Viser startup, and policy loading before the external timeout ended the process.
 - On `2026-05-11`, the BPTT train command entered active training epochs before the external timeout ended the process.
 - On `2026-05-11`, the SHAC train command entered active training epochs before the external timeout ended the process.
+
+## Quadrotor family
+
+### Architecture decision
+- `source/isaaclab_diffrl/isaaclab_diffrl/assets/` holds shared quadrotor and obstacle assets.
+- `source/isaaclab_diffrl/isaaclab_diffrl/quadrotor/` holds shared quadrotor action and observation helpers.
+- `source/isaaclab_diffrl/isaaclab_diffrl/tasks/manager_based/<task>/` holds task-owned manager-based semantics for `drone_position_control` and `drone_racing`.
+- `source/isaaclab_diffrl/isaaclab_diffrl/rollout/quadrotor_bridge.py` holds the shared 13D differentiable rollout bridge for the first-wave quadrotor tasks.
+- `source/isaaclab_diffrl/isaaclab_diffrl/integrations/mineral/manager_based_env_adapter.py` is the shared Mineral adapter seam for manager-based quadrotor tasks.
+- `scripts/mineral/train.py` uses the shared manager-based adapter for `Isaac-Drone-Position-Control-DiffRL-v0` and `Isaac-Drone-Racing-DiffRL-v0`.
+- `scripts/mineral/play.py` uses the same shared manager-based adapter and rollout bridge for quadrotor play so evaluation stays on the same semantics as training.
+
+### Validation commands
+- Run these commands inside `env_isaaclab`.
+
+### Commands
+- `python /home/tong/tongworkspace/isaac_develop/isaaclab_diffrl/scripts/mineral/test_drone_racing_bptt.py`
+- `python /home/tong/tongworkspace/isaac_develop/isaaclab_diffrl/scripts/mineral/test_drone_racing_shac.py`
+- `python /home/tong/tongworkspace/isaac_develop/isaaclab_diffrl/scripts/mineral/train.py --task Isaac-Drone-Racing-DiffRL-v0 --algo bptt --num_envs 8 --max_epochs 1 --horizon_len 8 --headless --wandb_mode disabled`
+- `python /home/tong/tongworkspace/isaac_develop/isaaclab_diffrl/scripts/mineral/train.py --task Isaac-Drone-Racing-DiffRL-v0 --algo shac --num_envs 8 --max_epochs 1 --horizon_len 8 --headless --wandb_mode disabled`
+- `python /home/tong/tongworkspace/isaac_develop/isaaclab_diffrl/scripts/mineral/play.py --task Isaac-Drone-Racing-DiffRL-v0 --algo shac --checkpoint /home/tong/tongworkspace/isaac_develop/isaaclab_diffrl/logs/mineral/shac/2026-05-13_22-53-58/ckpt/final.pth --num-envs 1 --num-episodes 1 --headless`
+
+### Validation result
+- On `2026-05-13`, `test_drone_racing_bptt.py` completed with `tracked_steps=5`, `has_action_grad=True`, and finite `max_abs_action_grad`.
+- On `2026-05-13`, `test_drone_racing_shac.py` completed with finite actor and critic tracer-bullet losses and `has_action_grad=True`.
+- On `2026-05-13`, the short BPTT train command completed one epoch with finite actor loss and wrote `logs/mineral/bptt/2026-05-13_23-55-13/ckpt/final.pth`.
+- On `2026-05-13`, the short SHAC train command completed one epoch with finite `value_loss=0.0027`, finite actor loss, and wrote `logs/mineral/shac/2026-05-13_22-53-58/ckpt/final.pth`.
+- On `2026-05-13`, the SHAC play command completed one episode on the shared manager-based adapter path without runtime errors.

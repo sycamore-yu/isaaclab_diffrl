@@ -106,17 +106,30 @@ class DroneRacingEnv(IsaaclabDiffrlManagerEnv):
 
         return gate_reward + progress_reward + ang_vel_penalty + lin_vel_penalty + term_penalty
 
-    def terminal_flags_from_observation(
-        self, observation: torch.Tensor, episode_step: torch.Tensor
+    def terminal_flags_from_state(
+        self, state: torch.Tensor, episode_step: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Compute termination flags.
+        """Compute termination flags from state.
 
-        - terminated: collision or crash (not used in current simple model)
+        - terminated: collision, bad orientation, or crash
         - truncated: episode length exceeded
         """
-        # For this tracer bullet, we only truncate on episode length
+        pos_w = state[:, 0:3]
+        quat_w = state[:, 3:7]
+
+        # 1. Height below minimum (0.1m)
+        below_min_height = pos_w[:, 2] < 0.1
+
+        # 2. Bad orientation (tilt > 90 degrees)
+        # Assuming quat is [w, x, y, z]. Z-axis projection = 1 - 2*(x^2 + y^2)
+        x = quat_w[:, 1]
+        y = quat_w[:, 2]
+        z_projected = 1.0 - 2.0 * (x * x + y * y)
+        bad_orientation = z_projected < 0.0
+
+        terminated = below_min_height | bad_orientation
+
         truncated = episode_step >= self.max_episode_length - 1
-        terminated = torch.zeros_like(truncated)
         done = terminated | truncated
         return terminated, truncated, done
 

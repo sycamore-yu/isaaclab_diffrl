@@ -64,25 +64,29 @@ def test_drone_racing_bptt():
     # Accumulate gradients over multiple steps (truncated BPTT)
     num_bptt_steps = 5
     accumulated_loss = 0.0
+    tracked_actions = []
+    step_losses = []
 
     for i in range(num_bptt_steps):
-        # Create action with requires_grad to track gradients
         action = torch.randn(adapter.num_envs, adapter.num_actions, device=adapter.device, requires_grad=True)
+        tracked_actions.append(action)
         obs, reward, done, info = adapter.step(action)
 
-        # Accumulate loss (use mean to avoid magnitude issues)
         step_loss = reward.mean()
+        step_losses.append(step_loss)
         accumulated_loss += step_loss.item()
+        print(f"  Step {i+1}: loss={step_loss.item():.6f}, done={done.any().item()}")
 
-        # Backward on this step's loss
-        step_loss.backward()
+    total_loss = torch.stack(step_losses).sum()
+    total_loss.backward()
 
-        print(f"  Step {i+1}: loss={step_loss.item():.6f}, action.grad is None={action.grad is None}")
+    print(f"\n[TEST] Accumulated loss: {accumulated_loss:.6f}")
+    print("[TEST] Per-step action gradients:")
+    for i, action in enumerate(tracked_actions, start=1):
+        print(f"  Step {i}: action.grad is None={action.grad is None}")
         if action.grad is not None:
             print(f"    grad abs mean: {action.grad.abs().mean().item():.8f}")
             print(f"    grad abs max: {action.grad.abs().max().item():.8f}")
-
-    print(f"\n[TEST] Accumulated loss: {accumulated_loss:.6f}")
 
     # Get gradient report
     report = adapter.transition_grad_report()

@@ -80,19 +80,33 @@ class DronePositionControlEnv(IsaaclabDiffrlManagerEnv):
 
         return pos_reward + vel_penalty + omega_penalty
 
-    def terminal_flags_from_observation(
-        self, observation: torch.Tensor, episode_step: torch.Tensor
+    def terminal_flags_from_state(
+        self, state: torch.Tensor, episode_step: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Compute termination flags."""
-        pos_error_b = observation[:, 0:3]
+        """Compute termination flags from state."""
+        pos_w = state[:, 0:3]
+        quat_w = state[:, 3:7]
+        target_pos_w = self.command_manager.get_term("target_pos").command[:, :3]
+        
+        pos_error_b, _ = subtract_frame_transforms(pos_w, quat_w, target_pos_w)
         arrived = torch.linalg.norm(pos_error_b, dim=-1) < self.arrival_radius
+        
         curr_time = episode_step.float() * (self.cfg.sim.dt * self.cfg.decimation)
         self.arrive_time.copy_(torch.where(arrived & (self.arrive_time == 0), curr_time, self.arrive_time))
 
         truncated = episode_step >= self.max_episode_length - 1
         truncated |= arrived & (curr_time > (self.arrive_time + self.wait_before_truncate))
-        terminated = torch.zeros_like(truncated)
+        
+        # Safety terminations
+        below_min_height = pos_w[:, 2] < 0.1
+        x = quat_w[:, 1]
+        y = quat_w[:, 2]
+        z_projected = 1.0 - 2.0 * (x * x + y * y)
+        bad_orientation = z_projected < 0.0
+        
+        terminated = below_min_height | bad_orientation
         done = terminated | truncated
+        
         self.success.copy_(arrived & truncated)
         return terminated, truncated, done
 

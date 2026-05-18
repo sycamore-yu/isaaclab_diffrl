@@ -39,6 +39,12 @@ class IsaaclabDiffrlManagerEnv(ManagerBasedRLEnv):
         """Compute termination flags from a differentiable observation tensor."""
         raise NotImplementedError
 
+    def terminal_flags_from_state(
+        self, state: torch.Tensor, episode_step: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute termination flags from a differentiable state tensor."""
+        raise NotImplementedError
+
     def apply_post_reset_rollout_state(
         self, env_ids: torch.Tensor, next_state: torch.Tensor, episode_step: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
